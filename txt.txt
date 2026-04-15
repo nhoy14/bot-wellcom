@@ -1,0 +1,2 @@
+i1TNqWMct00c6X17
+mongodb+srv://thoeurnpanha14_db_user:i1TNqWMct00c6X17@cluster0.elmqqky.mongodb.net/?appName=Cluster0
