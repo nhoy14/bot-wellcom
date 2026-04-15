@@ -5,30 +5,40 @@ from dotenv import load_dotenv
 import time
 from datetime import datetime
 from pymongo import MongoClient
+import certifi # ប្រើសម្រាប់ដោះស្រាយបញ្ហា SSL Handshake Failed
 
 # --- ១. ការកំណត់សុវត្ថិភាព និងការភ្ជាប់ Database ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 MONGO_URL = os.getenv('MONGO_URL')
 
+# ប្រកាស Variable ជាសកលសិន ដើម្បីកុំឱ្យ Error NameError
+db = None
+collection = None
+
 try:
-    # ភ្ជាប់ទៅកាន់ MongoDB Atlas
-    client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000)
+    # បន្ថែម tlsCAFile=certifi.where() ដើម្បីឱ្យការភ្ជាប់មានសុវត្ថិភាពលើ Server ក្រៅ
+    client = MongoClient(
+        MONGO_URL, 
+        serverSelectionTimeoutMS=5000, 
+        tlsCAFile=certifi.where()
+    )
     client.server_info() 
     db = client['discord_bot']
     collection = db['voice_activity']
     print("✅ [DATABASE] MongoDB Atlas Connected Successfully!")
 except Exception as e:
     print(f"❌ [DATABASE] Connection Error: {e}")
+    # បើ Connect មិនជាប់ collection នឹងនៅតែ None ដែលយើងនឹងឆែកក្នុង code បន្តទៀត
 
-# --- ការកំណត់ ID Channels (សូមពិនិត្យលេខ ID ឱ្យបានត្រឹមត្រូវ) ---
+# --- ការកំណត់ ID Channels ---
 GET_ROLES_CHANNEL_ID = 1492953771423043695 
 WELCOME_CHANNEL_ID = 1492953340584399009 
 
 intents = discord.Intents.default()
-intents.members = True          # សម្រាប់ Welcome System
-intents.voice_states = True     # សម្រាប់រាប់ម៉ោង Voice
-intents.message_content = True  # សម្រាប់ទទួល Command
+intents.members = True
+intents.voice_states = True
+intents.message_content = True
 
 bot = commands.Bot(command_prefix='.', intents=intents)
 dashboard_msg_id = None 
@@ -36,14 +46,21 @@ active_sessions = {}
 
 # --- ២. មុខងារជំនួយ (Utility Functions) ---
 def format_time(seconds):
-    """បំប្លែងវិនាទី ទៅជាទម្រង់ 00h 00m"""
     hours, remainder = divmod(int(seconds), 3600)
     minutes, _ = divmod(remainder, 60)
     return f"{hours:02d}h {minutes:02d}m"
 
 async def create_leaderboard_embed():
     """បង្កើត UI សម្រាប់ Dashboard និង .topall"""
-    data = list(collection.find().sort("total_seconds", -1).limit(10))
+    # ឆែកមើលក្រែងលោ Database Connect មិនជាប់
+    if collection is None:
+        return discord.Embed(title="⚠️ Database Error", description="មិនអាចទាក់ទងទៅកាន់ Database បានទេ!", color=discord.Color.red())
+
+    try:
+        data = list(collection.find().sort("total_seconds", -1).limit(10))
+    except Exception as e:
+        print(f"❌ Error fetching data: {e}")
+        data = []
     
     embed = discord.Embed(
         title="✨ TEMPERATURE VOICE LEADERBOARD ✨",
@@ -55,7 +72,7 @@ async def create_leaderboard_embed():
     if not data:
         embed.description += "\n\n*⌛ មិនទាន់មានទិន្នន័យនៅឡើយទេ...*"
     else:
-        # TOP 1 Champion Profile
+        # TOP 1 Profile
         top1_info = data[0]
         top1_user = bot.get_user(int(top1_info['user_id']))
         t1_name = f"**{top1_user.name}**" if top1_user else f"`ID: {top1_info['user_id']}`"
@@ -71,7 +88,6 @@ async def create_leaderboard_embed():
             inline=False
         )
 
-        # TOP 2 - 10
         others_list = ""
         for i, info in enumerate(data[1:10], start=2):
             user = bot.get_user(int(info['user_id']))
@@ -85,7 +101,7 @@ async def create_leaderboard_embed():
     embed.set_footer(text="Temperature System • Daily Refresh", icon_url=bot.user.display_avatar.url)
     return embed
 
-# --- ៣. Welcome System Event (តាមសំណើរបស់អ្នក) ---
+# --- ៣. Welcome System Event ---
 @bot.event
 async def on_member_join(member):
     channel = bot.get_channel(WELCOME_CHANNEL_ID)
@@ -102,22 +118,20 @@ async def on_member_join(member):
         embed.set_author(name=member.name, icon_url=member.display_avatar.url)
         embed.add_field(name="🔢 សមាជិកទី", value=f"{member.guild.member_count}", inline=True)
         embed.set_footer(text=f"Welcome to Temperament", icon_url=member.guild.icon.url if member.guild.icon else None)
-        
         await channel.send(f"ស្វាគមន៍សមាជិកថ្មី! {member.mention}", embed=embed)
 
-# --- ៤. Commands: .topall និង .topme ---
+# --- ៤. Commands ---
 @bot.command()
 async def topall(ctx):
-    """មើលតារាង Top 10 សរុប"""
     embed = await create_leaderboard_embed()
     await ctx.send(embed=embed)
 
 @bot.command()
 async def topme(ctx):
-    """មើលចំណាត់ថ្នាក់ និងម៉ោងផ្ទាល់ខ្លួន"""
+    if collection is None: return await ctx.send("❌ Database មិនទាន់ដំណើរការ។")
+    
     all_data = list(collection.find().sort("total_seconds", -1))
     user_id = str(ctx.author.id)
-    
     rank = next((i for i, info in enumerate(all_data, 1) if info['user_id'] == user_id), 0)
     
     if rank:
@@ -130,15 +144,14 @@ async def topme(ctx):
         embed.set_footer(text=f"Joined: {user_info.get('first_join_server', 'N/A')}")
         await ctx.send(embed=embed)
     else:
-        await ctx.send(f"❌ {ctx.author.mention} អ្នកមិនទាន់មានទិន្នន័យក្នុង Voice នៅឡើយទេ។")
+        await ctx.send(f"❌ {ctx.author.mention} មិនទាន់មានទិន្នន័យឡើយទេ។")
 
-# --- ៥. Tasks: Auto-Update Dashboard រៀងរាល់ ២៤ ម៉ោង ---
+# --- ៥. Tasks: Auto-Update Dashboard (២៤ ម៉ោងម្ដង) ---
 @tasks.loop(hours=24)
 async def auto_update_dashboard():
     global dashboard_msg_id
     channel = bot.get_channel(GET_ROLES_CHANNEL_ID)
     if not channel: return
-    
     embed = await create_leaderboard_embed()
     try:
         if dashboard_msg_id:
@@ -151,27 +164,22 @@ async def auto_update_dashboard():
         msg = await channel.send(embed=embed)
         dashboard_msg_id = msg.id
 
-# --- ៦. Events: Voice Tracking ---
+# --- ៦. Events: Tracking Voice ---
 @bot.event
 async def on_ready():
-    print(f'-------------------------------------')
     print(f'✅ Bot Status: Online ({bot.user.name})')
-    print(f'📊 Voice Tracking & Welcome System: ACTIVE')
-    print(f'-------------------------------------')
     if not auto_update_dashboard.is_running():
         auto_update_dashboard.start()
 
 @bot.event
 async def on_voice_state_update(member, before, after):
+    if collection is None: return
     u_id = str(member.id)
     now = time.time()
     join_date = member.joined_at.strftime("%b %d, %Y") if member.joined_at else "N/A"
 
-    # ចូល Voice
     if before.channel is None and after.channel is not None:
         active_sessions[u_id] = now
-
-    # ចេញពី Voice
     elif before.channel is not None and after.channel is None:
         if u_id in active_sessions:
             try:
@@ -181,7 +189,6 @@ async def on_voice_state_update(member, before, after):
                     {"$inc": {"total_seconds": duration}, "$setOnInsert": {"first_join_server": join_date}},
                     upsert=True
                 )
-                print(f"✅ [SAVED] {int(duration)}s for {member.name}")
             except Exception as e:
                 print(f"❌ [DB ERROR] {e}")
 
