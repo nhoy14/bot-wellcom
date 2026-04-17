@@ -1,39 +1,31 @@
 import discord
 from discord.ext import commands, tasks
 import os
-from dotenv import load_dotenv
 import time
 from datetime import datetime
+from dotenv import load_dotenv
 from pymongo import MongoClient
-import certifi # ប្រើសម្រាប់ដោះស្រាយបញ្ហា SSL Handshake Failed
+import certifi
 
-# --- ១. ការកំណត់សុវត្ថិភាព និងការភ្ជាប់ Database ---
+# --- 🟢 ១. SETUP & DATABASE ---
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
 MONGO_URL = os.getenv('MONGO_URL')
 
-# ប្រកាស Variable ជាសកលសិន ដើម្បីកុំឱ្យ Error NameError
-db = None
-collection = None
-
 try:
-    # បន្ថែម tlsCAFile=certifi.where() ដើម្បីឱ្យការភ្ជាប់មានសុវត្ថិភាពលើ Server ក្រៅ
-    client = MongoClient(
-        MONGO_URL, 
-        serverSelectionTimeoutMS=5000, 
-        tlsCAFile=certifi.where()
-    )
-    client.server_info() 
+    client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
     db = client['discord_bot']
     collection = db['voice_activity']
-    print("✅ [DATABASE] MongoDB Atlas Connected Successfully!")
+    print("✅ [DATABASE] Connected!")
 except Exception as e:
-    print(f"❌ [DATABASE] Connection Error: {e}")
-    # បើ Connect មិនជាប់ collection នឹងនៅតែ None ដែលយើងនឹងឆែកក្នុង code បន្តទៀត
+    print(f"❌ [DATABASE] Error: {e}")
+    collection = None
 
-# --- ការកំណត់ ID Channels ---
-GET_ROLES_CHANNEL_ID = 1492953771423043695 
-WELCOME_CHANNEL_ID = 1492953340584399009 
+# --- 🔵 ២. CONFIGURATION (IDs) ---
+WELCOME_CHANNEL_ID = 1492953340584399009
+LEADERBOARD_CHANNEL_ID = 1492953771423043695 
+CREATE_CHANNEL_ID = 1494254070632939591      
+PARENT_CATEGORY_ID = 1494236441725767701     
 
 intents = discord.Intents.default()
 intents.members = True
@@ -41,155 +33,130 @@ intents.voice_states = True
 intents.message_content = True
 
 bot = commands.Bot(command_prefix='.', intents=intents)
-dashboard_msg_id = None 
 active_sessions = {}
 
-# --- ២. មុខងារជំនួយ (Utility Functions) ---
+# --- 🟡 ៣. UI FUNCTIONS (Mention សម្រាប់លេខ ២ និង ៣) ---
 def format_time(seconds):
     hours, remainder = divmod(int(seconds), 3600)
     minutes, _ = divmod(remainder, 60)
-    return f"{hours:02d}h {minutes:02d}m"
+    return f"{hours:02}h {minutes:02}m"
 
-async def create_leaderboard_embed():
-    """បង្កើត UI សម្រាប់ Dashboard និង .topall"""
-    # ឆែកមើលក្រែងលោ Database Connect មិនជាប់
-    if collection is None:
-        return discord.Embed(title="⚠️ Database Error", description="មិនអាចទាក់ទងទៅកាន់ Database បានទេ!", color=discord.Color.red())
-
-    try:
-        data = list(collection.find().sort("total_seconds", -1).limit(10))
-    except Exception as e:
-        print(f"❌ Error fetching data: {e}")
-        data = []
+async def get_leaderboard_embed():
+    if collection is None: return discord.Embed(description="Database Error")
+    
+    data = list(collection.find().sort("total_seconds", -1).limit(10))
     
     embed = discord.Embed(
         title="✨ TEMPERATURE VOICE LEADERBOARD ✨",
         description="🏆 តារាងអ្នកសកម្មបំផុតក្នុង Voice Channels គ្រប់ជាន់ថ្នាក់\n" + "—" * 25,
-        color=0x2b2d31, 
-        timestamp=datetime.now()
+        color=0x2b2d31
     )
 
     if not data:
-        embed.description += "\n\n*⌛ មិនទាន់មានទិន្នន័យនៅឡើយទេ...*"
+        embed.description += "\n⌛ មិនទាន់មានទិន្នន័យនៅឡើយទេ..."
     else:
-        # TOP 1 Profile
-        top1_info = data[0]
-        top1_user = bot.get_user(int(top1_info['user_id']))
-        t1_name = f"**{top1_user.name}**" if top1_user else f"`ID: {top1_info['user_id']}`"
+        # --- 🥇 CURRENT CHAMPION (លេខ ១) ---
+        top1 = data[0]
+        u1 = bot.get_user(int(top1['user_id']))
+        u1_text = u1.mention if u1 else f"ID: {top1['user_id']}"
+        join_date = top1.get('first_join', "Apr 09, 2026")
         
-        if top1_user and top1_user.display_avatar:
-            embed.set_thumbnail(url=top1_user.display_avatar.url)
-        
+        if u1:
+            embed.set_thumbnail(url=u1.display_avatar.url)
+            
         embed.add_field(
-            name="🥇 CURRENT CHAMPION",
-            value=f"{t1_name}\n"
-                  f"┣ ⏱️ Time: `{format_time(top1_info['total_seconds'])}`\n"
-                  f"┗ 📅 Joined: `{top1_info.get('first_join_server', 'N/A')}`\n" + "—" * 15,
+            name=" CURRENT CHAMPION",
+            value=(
+                f"┣ 🥇 01 | **{u1_text}**\n"
+                f"┣ ⌚ Time: `{format_time(top1['total_seconds'])}`\n"
+                f"┗ 📅 Joined: `{join_date}`\n"
+                + "—" * 20
+            ),
             inline=False
         )
 
-        others_list = ""
-        for i, info in enumerate(data[1:10], start=2):
+        # --- 📜 TOP CONTENDERS (លេខ ២ ដល់ ១០) ---
+        contenders_text = ""
+        medals = {2: "🥈", 3: "🥉"}
+        
+        for i, info in enumerate(data[1:], start=2):
             user = bot.get_user(int(info['user_id']))
-            user_display = f"**{user.name}**" if user else f"User({info['user_id']})"
-            icon = "🥈" if i == 2 else "🥉" if i == 3 else f"🏅"
-            others_list += f"{icon} `{i:02d}` | {user_display} — `{format_time(info['total_seconds'])}`\n"
+            duration = format_time(info['total_seconds'])
+            
+            # ប្រសិនបើជាលេខ ២ ឬ លេខ ៣ យើងនឹង Mention (@) ដើម្បីឱ្យឃើញ Profile
+            if i <= 3:
+                name_display = user.mention if user else f"ID: {info['user_id']}"
+                medal = medals[i]
+            else:
+                # លេខ ៤ ដល់ ១០ បង្ហាញឈ្មោះធម្មតា (ដើម្បីកុំឱ្យអក្សរញ៉េរញ៉ៃពេក)
+                name_display = f"**{user.name}**" if user else f"ID: {info['user_id']}"
+                medal = "🏅"
 
-        if others_list:
-            embed.add_field(name="📜 TOP CONTENDERS", value=others_list, inline=False)
+            contenders_text += f"{medal} `{i:02d}` | {name_display} — `{duration}`\n"
 
-    embed.set_footer(text="Temperature System • Daily Refresh", icon_url=bot.user.display_avatar.url)
+        if contenders_text:
+            embed.add_field(name="📜 TOP CONTENDERS", value=contenders_text, inline=False)
+
+    embed.set_footer(text=f"Temperature System • Daily Refresh", icon_url=bot.user.display_avatar.url)
+    embed.timestamp = datetime.now()
     return embed
 
-# --- ៣. Welcome System Event ---
-@bot.event
-async def on_member_join(member):
-    channel = bot.get_channel(WELCOME_CHANNEL_ID)
-    if channel:
-        embed = discord.Embed(
-            title="🎊 សមាជិកថ្មីបានមកដល់ហើយ! 🎊",
-            description=f"សួស្តី {member.mention}! ស្វាគមន៍មកកាន់ **Server Temperament**។\n\n"
-                        f"🌟 រីករាយដែលបានអ្នកមកចូលរួមជាមួយពួកយើង!\n"
-                        f"📜 សូមអានច្បាប់ និងរីករាយជាមួយការជជែកលេងជាមួយពួកយើង!",
-            color=0xFFA2D2,
-            timestamp=datetime.now()
-        )
-        embed.set_thumbnail(url=member.display_avatar.url)
-        embed.set_author(name=member.name, icon_url=member.display_avatar.url)
-        embed.add_field(name="🔢 សមាជិកទី", value=f"{member.guild.member_count}", inline=True)
-        embed.set_footer(text=f"Welcome to Temperament", icon_url=member.guild.icon.url if member.guild.icon else None)
-        await channel.send(f"ស្វាគមន៍សមាជិកថ្មី! {member.mention}", embed=embed)
+# --- 🔴 ៤. EVENTS & LOGIC ---
 
-# --- ៤. Commands ---
-@bot.command()
-async def topall(ctx):
-    embed = await create_leaderboard_embed()
-    await ctx.send(embed=embed)
-
-@bot.command()
-async def topme(ctx):
-    if collection is None: return await ctx.send("❌ Database មិនទាន់ដំណើរការ។")
-    
-    all_data = list(collection.find().sort("total_seconds", -1))
-    user_id = str(ctx.author.id)
-    rank = next((i for i, info in enumerate(all_data, 1) if info['user_id'] == user_id), 0)
-    
-    if rank:
-        user_info = all_data[rank-1]
-        embed = discord.Embed(title="📊 Your Voice Rank Status", color=0x3498db)
-        embed.set_thumbnail(url=ctx.author.display_avatar.url)
-        embed.add_field(name="User", value=ctx.author.mention, inline=True)
-        embed.add_field(name="Your Rank", value=f"🏆 **#{rank}**", inline=True)
-        embed.add_field(name="Total Time", value=f"`{format_time(user_info['total_seconds'])}`", inline=True)
-        embed.set_footer(text=f"Joined: {user_info.get('first_join_server', 'N/A')}")
-        await ctx.send(embed=embed)
-    else:
-        await ctx.send(f"❌ {ctx.author.mention} មិនទាន់មានទិន្នន័យឡើយទេ។")
-
-# --- ៥. Tasks: Auto-Update Dashboard (២៤ ម៉ោងម្ដង) ---
-@tasks.loop(hours=24)
-async def auto_update_dashboard():
-    global dashboard_msg_id
-    channel = bot.get_channel(GET_ROLES_CHANNEL_ID)
-    if not channel: return
-    embed = await create_leaderboard_embed()
-    try:
-        if dashboard_msg_id:
-            msg = await channel.fetch_message(dashboard_msg_id)
-            await msg.edit(embed=embed)
-        else:
-            msg = await channel.send(embed=embed)
-            dashboard_msg_id = msg.id
-    except:
-        msg = await channel.send(embed=embed)
-        dashboard_msg_id = msg.id
-
-# --- ៦. Events: Tracking Voice ---
 @bot.event
 async def on_ready():
-    print(f'✅ Bot Status: Online ({bot.user.name})')
-    if not auto_update_dashboard.is_running():
-        auto_update_dashboard.start()
+    print(f'✅ Bot Status: ONLINE ({bot.user.name})')
+    if not auto_update_leaderboard.is_running():
+        auto_update_leaderboard.start()
 
 @bot.event
 async def on_voice_state_update(member, before, after):
-    if collection is None: return
     u_id = str(member.id)
     now = time.time()
-    join_date = member.joined_at.strftime("%b %d, %Y") if member.joined_at else "N/A"
 
+    # Voice Tracking
     if before.channel is None and after.channel is not None:
         active_sessions[u_id] = now
     elif before.channel is not None and after.channel is None:
         if u_id in active_sessions:
-            try:
-                duration = now - active_sessions.pop(u_id)
+            duration = now - active_sessions.pop(u_id)
+            if collection is not None:
                 collection.update_one(
                     {"user_id": u_id},
-                    {"$inc": {"total_seconds": duration}, "$setOnInsert": {"first_join_server": join_date}},
+                    {"$inc": {"total_seconds": duration}, "$setOnInsert": {"first_join": datetime.now().strftime("%b %d, %Y")}},
                     upsert=True
                 )
-            except Exception as e:
-                print(f"❌ [DB ERROR] {e}")
 
-bot.run(TOKEN)
+    # Auto Create System
+    if after.channel and after.channel.id == CREATE_CHANNEL_ID:
+        guild = member.guild
+        parent_cat = guild.get_channel(PARENT_CATEGORY_ID)
+        overwrites = {
+            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
+            member: discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True)
+        }
+        new_cat = await guild.create_category(name=f"⭐ {member.name}'s Space", overwrites=overwrites, position=parent_cat.position + 1 if parent_cat else None)
+        new_ch = await guild.create_voice_channel(name=f"🎙️ │ {member.name}'s Room", category=new_cat)
+        await member.move_to(new_ch)
+
+    # Cleanup System
+    if before.channel and before.channel.category and "⭐" in before.channel.category.name:
+        if len(before.channel.members) == 0:
+            category = before.channel.category
+            await before.channel.delete()
+            await category.delete()
+
+# --- 🟣 ៥. TASKS & COMMANDS ---
+
+@tasks.loop(hours=24)
+async def auto_update_leaderboard():
+    channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
+    if channel:
+        await channel.purge(limit=5)
+        await channel.send(embed=await get_leaderboard_embed())
+
+@bot.command()
+async def top(ctx):
+    await ctx.send(embed=await get_leaderboard_embed())
+
+bot.run(TOKEN)  
