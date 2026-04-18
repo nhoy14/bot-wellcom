@@ -16,6 +16,8 @@ try:
     client = MongoClient(MONGO_URL, serverSelectionTimeoutMS=5000, tlsCAFile=certifi.where())
     db = client['discord_bot']
     collection = db['voice_activity']
+    # បង្កើត Collection ថ្មីមួយទៀតសម្រាប់ទុក Message ID កុំឱ្យបាត់ពេល Bot Restart
+    msg_collection = db['bot_settings']
     print("✅ [DATABASE] Connected!")
 except Exception as e:
     print(f"❌ [DATABASE] Error: {e}")
@@ -89,7 +91,7 @@ async def get_leaderboard_embed():
         if contenders_text:
             embed.add_field(name="📜 TOP CONTENDERS", value=contenders_text, inline=False)
 
-    embed.set_footer(text=f"Temperature System • Daily Refresh", icon_url=bot.user.display_avatar.url)
+    embed.set_footer(text=f"Last Updated: {datetime.now().strftime('%H:%M:%S')}")
     embed.timestamp = datetime.now()
     return embed
 
@@ -105,7 +107,6 @@ async def on_ready():
 async def on_voice_state_update(member, before, after):
     u_id = str(member.id)
     now = time.time()
-
     if before.channel is None and after.channel is not None:
         active_sessions[u_id] = now
     elif before.channel is not None and after.channel is None:
@@ -117,75 +118,67 @@ async def on_voice_state_update(member, before, after):
                     {"$inc": {"total_seconds": duration}, "$setOnInsert": {"first_join": datetime.now().strftime("%b %d, %Y")}},
                     upsert=True
                 )
-
+    # Dynamic Voice Room Logic (Create/Delete) នៅដដែល...
     if after.channel and after.channel.id == CREATE_CHANNEL_ID:
         guild = member.guild
         parent_cat = guild.get_channel(PARENT_CATEGORY_ID)
-        overwrites = {
-            guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True),
-            member: discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True)
-        }
+        overwrites = {guild.default_role: discord.PermissionOverwrite(view_channel=True, connect=True), member: discord.PermissionOverwrite(manage_channels=True, manage_permissions=True, move_members=True)}
         new_cat = await guild.create_category(name=f"⭐ {member.name}'s Space", overwrites=overwrites, position=parent_cat.position + 1 if parent_cat else None)
         new_ch = await guild.create_voice_channel(name=f"🎙️ │ {member.name}'s Room", category=new_cat)
         await member.move_to(new_ch)
-
     if before.channel and before.channel.category and "⭐" in before.channel.category.name:
         if len(before.channel.members) == 0:
             category = before.channel.category
             await before.channel.delete()
             await category.delete()
 
-# --- 🟠 ៥. ERROR HANDLING ---
-@bot.event
-async def on_command_error(ctx, error):
-    if isinstance(error, commands.CommandNotFound):
-        embed = discord.Embed(
-            title="❌ បញ្ជាមិនត្រឹមត្រូវ!",
-            description=f"មិនមានបញ្ជា `{ctx.invoked_with}` ក្នុងប្រព័ន្ធទេ។\n\n💡 បញ្ជាដែលត្រូវគឺ: `.top` ឬ `.me`",
-            color=0xff0000
-        )
-        await ctx.send(embed=embed, delete_after=10)
+# --- 🟣 ៥. TASKS (EDIT MESSAGE MODE) ---
 
-# --- 🟣 ៦. TASKS & COMMANDS ---
-
-@tasks.loop(minutes=5) # UPDATE រៀងរាល់ ៥ នាទីម្ដង
+@tasks.loop(minutes=5)
 async def auto_update_leaderboard():
     channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
-    if channel:
-        await channel.purge(limit=5)
-        await channel.send(embed=await get_leaderboard_embed())
+    if not channel: return
+
+    # ទាញយក Message ID ពី Database
+    config = msg_collection.find_one({"type": "leaderboard_msg"})
+    new_embed = await get_leaderboard_embed()
+
+    if config:
+        try:
+            # បើមាន ID ក្នុង DB គឺយើង Edit លើសារនោះ
+            msg = await channel.fetch_message(config["message_id"])
+            await msg.edit(embed=new_embed)
+            print("🔄 [EDITED] Leaderboard updated.")
+        except discord.NotFound:
+            # បើមាន ID តែរកសារមិនឃើញ (ប្រហែលត្រូវគេលុប) គឺផ្ញើថ្មី
+            new_msg = await channel.send(embed=new_embed)
+            msg_collection.update_one({"type": "leaderboard_msg"}, {"$set": {"message_id": new_msg.id}}, upsert=True)
+    else:
+        # បើមិនទាន់មានសោះ គឺផ្ញើថ្មី
+        new_msg = await channel.send(embed=new_embed)
+        msg_collection.update_one({"type": "leaderboard_msg"}, {"$set": {"message_id": new_msg.id}}, upsert=True)
 
 @bot.command()
 async def top(ctx):
     await ctx.send(embed=await get_leaderboard_embed())
 
-@bot.command(aliases=['topme', 'profile', 'myinfo'])
+@bot.command(aliases=['topme', 'profile'])
 async def me(ctx):
+    # កូដ .me ដូចមុន...
     u_id = str(ctx.author.id)
     all_data = list(collection.find().sort("total_seconds", -1))
     user_data = next((item for item in all_data if item["user_id"] == u_id), None)
-    
     rank = "N/A"
     if user_data:
         for index, item in enumerate(all_data):
-            if item["user_id"] == u_id:
-                rank = index + 1
-                break
-
+            if item["user_id"] == u_id: rank = index + 1; break
     embed = discord.Embed(title="📊 Your Voice Rank Status", color=ctx.author.color)
     if user_data:
-        total_seconds = user_data.get('total_seconds', 0)
-        join_date = user_data.get('first_join', "Feb 04, 2026")
-        
         embed.add_field(name="User", value=f"{ctx.author.mention}", inline=True)
         embed.add_field(name="Your Rank", value=f"🏆 **#{rank}**", inline=True)
-        embed.add_field(name="Total Time", value=f"`{format_time(total_seconds)}`", inline=True)
-        embed.description = f"Joined: {join_date}"
-    else:
-        embed.description = "⌛ មិនទាន់មានទិន្នន័យរបស់អ្នកទេ។"
-
+        embed.add_field(name="Total Time", value=f"`{format_time(user_data['total_seconds'])}`", inline=True)
+        embed.description = f"Joined: {user_data.get('first_join', 'N/A')}"
     embed.set_thumbnail(url=ctx.author.display_avatar.url)
-    embed.set_footer(text=f"ID: {ctx.author.id}")
     await ctx.send(embed=embed)
 
 bot.run(TOKEN)
