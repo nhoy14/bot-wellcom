@@ -35,7 +35,7 @@ intents.message_content = True
 bot = commands.Bot(command_prefix='.', intents=intents)
 active_sessions = {}
 
-# --- 🟡 ៣. UI FUNCTIONS (Mention សម្រាប់លេខ ២ និង ៣) ---
+# --- 🟡 ៣. UI FUNCTIONS ---
 def format_time(seconds):
     hours, remainder = divmod(int(seconds), 3600)
     minutes, _ = divmod(remainder, 60)
@@ -65,7 +65,7 @@ async def get_leaderboard_embed():
             embed.set_thumbnail(url=u1.display_avatar.url)
             
         embed.add_field(
-            name=" CURRENT CHAMPION",
+            name="🥇 CURRENT CHAMPION",
             value=(
                 f"┣ 🥇 01 | **{u1_text}**\n"
                 f"┣ ⌚ Time: `{format_time(top1['total_seconds'])}`\n"
@@ -83,12 +83,10 @@ async def get_leaderboard_embed():
             user = bot.get_user(int(info['user_id']))
             duration = format_time(info['total_seconds'])
             
-            # ប្រសិនបើជាលេខ ២ ឬ លេខ ៣ យើងនឹង Mention (@) ដើម្បីឱ្យឃើញ Profile
             if i <= 3:
                 name_display = user.mention if user else f"ID: {info['user_id']}"
                 medal = medals[i]
             else:
-                # លេខ ៤ ដល់ ១០ បង្ហាញឈ្មោះធម្មតា (ដើម្បីកុំឱ្យអក្សរញ៉េរញ៉ៃពេក)
                 name_display = f"**{user.name}**" if user else f"ID: {info['user_id']}"
                 medal = "🏅"
 
@@ -146,9 +144,20 @@ async def on_voice_state_update(member, before, after):
             await before.channel.delete()
             await category.delete()
 
-# --- 🟣 ៥. TASKS & COMMANDS ---
+# --- 🟠 ៥. ERROR HANDLING (ពេល User វាយបញ្ជាខុស) ---
+@bot.event
+async def on_command_error(ctx, error):
+    if isinstance(error, commands.CommandNotFound):
+        embed = discord.Embed(
+            title="❌ បញ្ជាមិនត្រឹមត្រូវ!",
+            description=f"មិនមានបញ្ជា `{ctx.invoked_with}` ក្នុងប្រព័ន្ធទេ។\n\n💡 បញ្ជាដែលត្រឹមត្រូវគឺ: `.top` ឬ `.me`",
+            color=0xff0000
+        )
+        await ctx.send(embed=embed, delete_after=10)
 
-@tasks.loop(hours=24)
+# --- 🟣 ៦. TASKS & COMMANDS ---
+
+@tasks.loop(hours=5)
 async def auto_update_leaderboard():
     channel = bot.get_channel(LEADERBOARD_CHANNEL_ID)
     if channel:
@@ -157,6 +166,32 @@ async def auto_update_leaderboard():
 
 @bot.command()
 async def top(ctx):
+    """មើលតារាងអ្នកសកម្មបំផុតទាំង ១០"""
     await ctx.send(embed=await get_leaderboard_embed())
 
-bot.run(TOKEN)  
+@bot.command(aliases=['topme', 'profile'])
+async def me(ctx):
+    """មើលព័ត៌មានផ្ទាល់ខ្លួនរបស់អ្នក"""
+    u_id = str(ctx.author.id)
+    user_data = collection.find_one({"user_id": u_id}) if collection is not None else None
+    
+    embed = discord.Embed(
+        title=f"👤 ព័ត៌មានរបស់ {ctx.author.name}",
+        color=ctx.author.color,
+        timestamp=datetime.now()
+    )
+    
+    if user_data:
+        total_seconds = user_data.get('total_seconds', 0)
+        join_date = user_data.get('first_join', "មិនមានទិន្នន័យ")
+        
+        embed.add_field(name="⏱️ ម៉ោងសរុបក្នុង Voice", value=f"`{format_time(total_seconds)}`", inline=True)
+        embed.add_field(name="📅 ថ្ងៃចូល Server", value=f"`{join_date}`", inline=True)
+    else:
+        embed.description = "⌛ មិនទាន់មានទិន្នន័យសកម្មភាពរបស់អ្នកនៅឡើយទេ។"
+
+    embed.set_thumbnail(url=ctx.author.display_avatar.url)
+    embed.set_footer(text=f"ID: {ctx.author.id}")
+    await ctx.send(embed=embed)
+
+bot.run(TOKEN)
